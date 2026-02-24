@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 set -e
-echo "Script by @Incognito_Coder - Alireza Ahmand"
+echo "Script by @Incognito_Coder - Alireza Ahmand && Arash Ariaye"
 echo "Installing Backhaul Watchdog..."
 
 INSTALL_PATH="/usr/local/bin/backhaul-watchdog.sh"
@@ -12,7 +12,8 @@ cat > "$INSTALL_PATH" << 'EOF'
 #!/usr/bin/env bash
 
 CONFIG_DIR="/root/backhaul-core"
-COOLDOWN=10
+COOLDOWN=30
+CHECK_INTERVAL=5
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1"
@@ -29,12 +30,21 @@ monitor_service() {
         return
     fi
 
-    log "[$SERVICE] Monitoring..."
+    log "[$SERVICE] Monitoring (last line check every ${CHECK_INTERVAL}s)..."
 
-    journalctl -u "$SERVICE" -f -o cat | while read -r line; do
-        if [[ "$line" == *"Heartbeat timeout — Status: 🔴 Disconnected"* ]]; then
+    while true; do
+        
+        LAST_LINE=$(journalctl -u "$SERVICE" -n 1 -o cat 2>/dev/null)
 
-            log "[$SERVICE] Disconnected detected"
+        if [[ -z "$LAST_LINE" ]]; then
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
+
+        if [[ "$LAST_LINE" == *"Heartbeat timeout — Status: 🔴 Disconnected"* || \
+              "$LAST_LINE" == *"invalid packet received: not IPv4 packet"* ]]; then
+
+            log "[$SERVICE] Problem detected in LAST LINE → $LAST_LINE"
 
             CURRENT_PROFILE=$(grep -E '^profile\s*=' "$TOML_FILE" | awk -F'"' '{print $2}')
 
@@ -43,17 +53,22 @@ monitor_service() {
             elif [[ "$CURRENT_PROFILE" == "bip" ]]; then
                 NEW_PROFILE="tcp"
             else
-                log "[$SERVICE] Unknown profile: $CURRENT_PROFILE"
+                log "[$SERVICE] Unknown profile: $CURRENT_PROFILE → skipping"
+                sleep "$CHECK_INTERVAL"
                 continue
             fi
 
-            log "[$SERVICE] Switching $CURRENT_PROFILE → $NEW_PROFILE"
+            log "[$SERVICE] Switching profile: $CURRENT_PROFILE → $NEW_PROFILE"
 
             sed -i "s/^profile\s*=\s*\"$CURRENT_PROFILE\"/profile = \"$NEW_PROFILE\"/" "$TOML_FILE"
 
             systemctl restart "$SERVICE"
+            log "[$SERVICE] Restarted"
+
             sleep "$COOLDOWN"
         fi
+
+        sleep "$CHECK_INTERVAL"
     done
 }
 
@@ -64,11 +79,13 @@ while true; do
         | grep -v '^backhaul-watchdog\.service$')
 
     for FULL_SERVICE in $SERVICES; do
-        monitor_service "$FULL_SERVICE" &
+        
+        if ! pgrep -f "monitor_service $FULL_SERVICE" > /dev/null; then
+            monitor_service "$FULL_SERVICE" &
+        fi
     done
 
-    wait
-    sleep 5
+    sleep 10 
 done
 EOF
 
