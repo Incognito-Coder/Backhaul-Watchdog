@@ -13,7 +13,6 @@ cat > "$INSTALL_PATH" << 'EOF'
 
 CONFIG_DIR="/root/backhaul-core"
 COOLDOWN=30
-CHECK_INTERVAL=5
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1"
@@ -24,69 +23,52 @@ monitor_service() {
     SERVICE="${FULL_SERVICE%.service}"
     NAME="${SERVICE#backhaul-}"
     TOML_FILE="${CONFIG_DIR}/${NAME}.toml"
+    LOG_LINE="$2"
 
     if [[ ! -f "$TOML_FILE" ]]; then
         log "[$SERVICE] Config not found: $TOML_FILE"
         return
     fi
 
-    log "[$SERVICE] Monitoring (last line check every ${CHECK_INTERVAL}s)..."
+    if [[ "$LOG_LINE" == *"Heartbeat timeout — Status: 🔴 Disconnected"* || \
+          "$LOG_LINE" == *"invalid packet received: not IPv4 packet"* ]]; then
 
-    while true; do
-        
-        LAST_LINE=$(journalctl -u "$SERVICE" -n 1 -o cat 2>/dev/null)
+        log "[$SERVICE] Problem detected in log → $LOG_LINE"
 
-        if [[ -z "$LAST_LINE" ]]; then
-            sleep "$CHECK_INTERVAL"
-            continue
+        CURRENT_PROFILE=$(grep -E '^profile\s*=' "$TOML_FILE" | awk -F'"' '{print $2}')
+
+        if [[ "$CURRENT_PROFILE" == "tcp" ]]; then
+            NEW_PROFILE="bip"
+        elif [[ "$CURRENT_PROFILE" == "bip" ]]; then
+            NEW_PROFILE="tcp"
+        else
+            log "[$SERVICE] Unknown profile: $CURRENT_PROFILE → skipping"
+            return
         fi
 
-        if [[ "$LAST_LINE" == *"Heartbeat timeout — Status: 🔴 Disconnected"* || \
-              "$LAST_LINE" == *"invalid packet received: not IPv4 packet"* ]]; then
+        log "[$SERVICE] Switching profile: $CURRENT_PROFILE → $NEW_PROFILE"
 
-            log "[$SERVICE] Problem detected in LAST LINE → $LAST_LINE"
+        sed -i "s/^profile\s*=\s*\"$CURRENT_PROFILE\"/profile = \"$NEW_PROFILE\"/" "$TOML_FILE"
 
-            CURRENT_PROFILE=$(grep -E '^profile\s*=' "$TOML_FILE" | awk -F'"' '{print $2}')
+        systemctl restart "$SERVICE"
+        log "[$SERVICE] Restarted"
 
-            if [[ "$CURRENT_PROFILE" == "tcp" ]]; then
-                NEW_PROFILE="bip"
-            elif [[ "$CURRENT_PROFILE" == "bip" ]]; then
-                NEW_PROFILE="tcp"
-            else
-                log "[$SERVICE] Unknown profile: $CURRENT_PROFILE → skipping"
-                sleep "$CHECK_INTERVAL"
-                continue
-            fi
-
-            log "[$SERVICE] Switching profile: $CURRENT_PROFILE → $NEW_PROFILE"
-
-            sed -i "s/^profile\s*=\s*\"$CURRENT_PROFILE\"/profile = \"$NEW_PROFILE\"/" "$TOML_FILE"
-
-            systemctl restart "$SERVICE"
-            log "[$SERVICE] Restarted"
-
-            sleep "$COOLDOWN"
-        fi
-
-        sleep "$CHECK_INTERVAL"
-    done
+        sleep "$COOLDOWN"
+    fi
 }
 
-while true; do
-    SERVICES=$(systemctl list-units --type=service --no-legend \
-        | awk '{print $1}' \
-        | grep '^backhaul-' \
-        | grep -v '^backhaul-watchdog\.service$')
+SERVICES=$(systemctl list-units --type=service --no-legend \
+    | awk '{print $1}' \
+    | grep '^backhaul-' \
+    | grep -v '^backhaul-watchdog\.service$')
 
-    for FULL_SERVICE in $SERVICES; do
-        
-        if ! pgrep -f "monitor_service $FULL_SERVICE" > /dev/null; then
-            monitor_service "$FULL_SERVICE" &
-        fi
-    done
-
-    sleep 10 
+for SERVICE in $SERVICES; do
+    log "[$SERVICE] Monitoring logs in real time..."
+    journalctl -u "$SERVICE" -f -o cat | while read -r LOG_LINE; do
+        monitor_service "$SERVICE" "$LOG_LINE"
+    done &
 done
+wait
 EOF
 
 chmod +x "$INSTALL_PATH"
