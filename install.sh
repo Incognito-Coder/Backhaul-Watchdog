@@ -14,8 +14,20 @@ cat > "$INSTALL_PATH" << 'EOF'
 CONFIG_DIR="/root/backhaul-core"
 COOLDOWN=30
 
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1"
+# Log coloring
+RED="\033[0;31m"
+YELLOW="\033[0;33m"
+GREEN="\033[0;32m"
+NC="\033[0m" # No Color
+
+log_info() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') ${GREEN}[INFO]${NC} $1"
+}
+log_warn() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') ${YELLOW}[WARN]${NC} $1"
+}
+log_error() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') ${RED}[ERROR]${NC} $1"
 }
 
 monitor_service() {
@@ -26,14 +38,14 @@ monitor_service() {
     LOG_LINE="$2"
 
     if [[ ! -f "$TOML_FILE" ]]; then
-        log "[$SERVICE] Config not found: $TOML_FILE"
+           log_error "[$SERVICE] Config not found: $TOML_FILE"
         return
     fi
 
     if [[ "$LOG_LINE" == *"Heartbeat timeout — Status: 🔴 Disconnected"* || \
           "$LOG_LINE" == *"invalid packet received: not IPv4 packet"* ]]; then
 
-        log "[$SERVICE] Problem detected in log → $LOG_LINE"
+          log_warn "[$SERVICE] Problem detected in log → $LOG_LINE"
 
         CURRENT_PROFILE=$(grep -E '^profile\s*=' "$TOML_FILE" | awk -F'"' '{print $2}')
 
@@ -42,16 +54,16 @@ monitor_service() {
         elif [[ "$CURRENT_PROFILE" == "bip" ]]; then
             NEW_PROFILE="tcp"
         else
-            log "[$SERVICE] Unknown profile: $CURRENT_PROFILE → skipping"
+                log_error "[$SERVICE] Unknown profile: $CURRENT_PROFILE → skipping"
             return
         fi
 
-        log "[$SERVICE] Switching profile: $CURRENT_PROFILE → $NEW_PROFILE"
+        log_info "[$SERVICE] Switching profile: $CURRENT_PROFILE → $NEW_PROFILE"
 
         sed -i "s/^profile\s*=\s*\"$CURRENT_PROFILE\"/profile = \"$NEW_PROFILE\"/" "$TOML_FILE"
 
         systemctl restart "$SERVICE"
-        log "[$SERVICE] Restarted"
+            log_info "[$SERVICE] Restarted"
 
         sleep "$COOLDOWN"
     fi
@@ -63,7 +75,7 @@ SERVICES=$(systemctl list-units --type=service --no-legend \
     | grep -v '^backhaul-watchdog\.service$')
 
 for SERVICE in $SERVICES; do
-    log "[$SERVICE] Monitoring logs in real time..."
+    log_info "[$SERVICE] Monitoring logs in real time..."
     journalctl -u "$SERVICE" -f -o cat | while read -r LOG_LINE; do
         monitor_service "$SERVICE" "$LOG_LINE"
     done &
